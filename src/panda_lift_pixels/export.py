@@ -79,7 +79,10 @@ def extract_actor(sb3_model):
     actor only (no critic). The algorithm is auto-detected from the model's class name.
     """
     algo = type(sb3_model).__name__.upper()
-    policy = sb3_model.policy.to("cpu").eval()
+    # Do NOT change the model's device here: extract_actor must be side-effect-free so it can be
+    # called mid-training (e.g. to count params) without breaking a GPU training loop. Device
+    # placement for tracing is handled by export_model.
+    policy = sb3_model.policy.eval()
 
     if algo in ("PPO", "A2C"):
         actor = _OnPolicyActor(
@@ -101,8 +104,14 @@ def extract_actor(sb3_model):
 
 
 def export_model(sb3_model, path="model.pt"):
-    """Extract ``sb3_model``'s deterministic actor, trace it to TorchScript, save it to ``path``."""
-    actor = extract_actor(sb3_model)
+    """Extract ``sb3_model``'s deterministic actor, trace it to TorchScript, save it to ``path``.
+
+    Tracing runs on CPU (the grader is CPU-only). The actor shares parameters with the training
+    policy, so we move them to CPU for tracing and restore the original device afterwards — this
+    is safe to call mid-training on a GPU model.
+    """
+    device = sb3_model.policy.device
+    actor = extract_actor(sb3_model).to("cpu")
     example = torch.zeros(1, *OBS_SHAPE, dtype=torch.float32)
 
     # NOTE: do NOT torch.jit.freeze() — freezing inlines parameters into graph constants, after
@@ -110,6 +119,7 @@ def export_model(sb3_model, path="model.pt"):
     with torch.no_grad():
         traced = torch.jit.trace(actor, example)
     torch.jit.save(traced, path)
+    sb3_model.policy.to(device)  # restore the training device (actor shares params with policy)
     return path
 
 
