@@ -1,14 +1,16 @@
 """Export a trained Stable-Baselines3 model to a standalone TorchScript ``model.pt``.
 
-The exported module maps an observation ``float32 (B, 12, 96, 96)`` in ``[0, 1]`` to an action
+The exported module maps an observation ``float32 (B, 4, 96, 96)`` in ``[0, 1]`` to an action
 ``(B, 8)`` in ``[-1, 1]``, and loads with ``torch.jit.load`` alone — no SB3 needed at grading.
 
-Supported algorithms:
-  * off-policy actors — SAC, TD3, TQC  (traces ``policy.actor(obs, deterministic=True)``),
-  * on-policy         — PPO, A2C       (traces ``policy._predict(obs, deterministic=True)``).
+Supported algorithms (the ones allowed in Project 2):
+  * on-policy  — PPO, A2C        (actor lives inside ``ActorCriticPolicy``),
+  * off-policy — SAC             (separate actor; forward samples, so we rebuild the mean path),
+  * off-policy — TD3, DDPG       (separate actor whose ``mu`` already ends in ``tanh``).
 
-This module does not import Stable-Baselines3; it only duck-types the model you pass in, so
-importing it stays cheap for the grader.
+The extracted module contains the **actor only** (no critic), so ``model.pt`` is ~half the size
+of the full policy. This module does not import Stable-Baselines3; it only reads attributes off
+the model you pass in, so importing it stays cheap for the grader.
 """
 
 import torch
@@ -16,41 +18,97 @@ import torch
 from .contract import OBS_SHAPE
 
 
-class _DeterministicActor(torch.nn.Module):
-    """Off-policy (SAC/TD3/TQC): the actor's deterministic (tanh-squashed) action."""
+class _OnPolicyActor(torch.nn.Module):
+    """PPO / A2C: reconstruct the actor from the ActorCriticPolicy pieces.
 
-    def __init__(self, actor):
+    Path: ``pi_features_extractor -> mlp_extractor.policy_net -> action_net`` (raw action).
+    """
+
+    def __init__(self, pi_features_extractor, policy_net, action_net):
         super().__init__()
-        self.actor = actor
+        self.features_extractor = pi_features_extractor
+        self.policy_net = policy_net
+        self.action_net = action_net
 
     def forward(self, obs):
-        return self.actor(obs, deterministic=True)
+        features = self.features_extractor(obs)
+        latent_pi = self.policy_net(features)
+        return self.action_net(latent_pi)
 
 
-class _DeterministicPolicy(torch.nn.Module):
-    """On-policy (PPO/A2C): ``_predict`` returns a single deterministic action tensor."""
+class _SACActor(torch.nn.Module):
+    """SAC: deterministic action is ``tanh(mu(latent_pi(features)))``.
 
-    def __init__(self, policy):
+    SAC's ``Actor.forward`` samples from a squashed Gaussian; to keep the traced graph clean and
+    dependency-free we rebuild the deterministic mean path and squash it ourselves.
+    """
+
+    def __init__(self, sac_actor):
         super().__init__()
-        self.policy = policy
+        self.features_extractor = sac_actor.features_extractor
+        self.latent_pi = sac_actor.latent_pi
+        self.mu = sac_actor.mu
 
     def forward(self, obs):
-        return self.policy._predict(obs, deterministic=True)
+        features = self.features_extractor(obs)
+        latent = self.latent_pi(features)
+        return torch.tanh(self.mu(latent))
+
+
+class _TD3Actor(torch.nn.Module):
+    """TD3 / DDPG: ``mu`` is a full ``Sequential`` that already ends in ``tanh``.
+
+    So the deterministic action is simply ``mu(features)`` — no extra squashing.
+    """
+
+    def __init__(self, td3_actor):
+        super().__init__()
+        self.features_extractor = td3_actor.features_extractor
+        self.mu = td3_actor.mu
+
+    def forward(self, obs):
+        features = self.features_extractor(obs)
+        return self.mu(features)
+
+
+def extract_actor(sb3_model):
+    """Return a standalone actor ``nn.Module`` extracted from an SB3 model.
+
+    Works for A2C, PPO (on-policy) and DDPG, TD3, SAC (off-policy). The returned module maps
+    ``obs (B, 4, 96, 96)`` in ``[0, 1]`` to ``action (B, 8)`` in ``[-1, 1]`` and contains the
+    actor only (no critic). The algorithm is auto-detected from the model's class name.
+    """
+    algo = type(sb3_model).__name__.upper()
+    policy = sb3_model.policy.to("cpu").eval()
+
+    if algo in ("PPO", "A2C"):
+        actor = _OnPolicyActor(
+            policy.pi_features_extractor,
+            policy.mlp_extractor.policy_net,
+            policy.action_net,
+        )
+    elif algo == "SAC":
+        actor = _SACActor(policy.actor)
+    elif algo in ("TD3", "DDPG"):
+        actor = _TD3Actor(policy.actor)
+    else:
+        raise ValueError(
+            f"Unsupported algorithm: {algo}. Supported: A2C, PPO, DDPG, TD3, SAC."
+        )
+
+    actor.eval()
+    return actor
 
 
 def export_model(sb3_model, path="model.pt"):
-    """Trace ``sb3_model``'s deterministic actor to TorchScript and save it to ``path``."""
-    policy = sb3_model.policy.to("cpu").eval()
+    """Extract ``sb3_model``'s deterministic actor, trace it to TorchScript, save it to ``path``."""
+    actor = extract_actor(sb3_model)
     example = torch.zeros(1, *OBS_SHAPE, dtype=torch.float32)
-
-    actor = getattr(policy, "actor", None)
-    module = _DeterministicActor(actor) if actor is not None else _DeterministicPolicy(policy)
-    module.eval()
 
     # NOTE: do NOT torch.jit.freeze() — freezing inlines parameters into graph constants, after
     # which `.parameters()` is empty and the grader's parameter-count check cannot see the model.
     with torch.no_grad():
-        traced = torch.jit.trace(module, example)
+        traced = torch.jit.trace(actor, example)
     torch.jit.save(traced, path)
     return path
 

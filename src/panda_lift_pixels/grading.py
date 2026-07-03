@@ -47,7 +47,7 @@ def _seed_offset():
 
 @torch.no_grad()
 def _act(policy, obs):
-    tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)   # (1, 12, 96, 96)
+    tensor = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)   # (1, 4, 96, 96)
     action = policy(tensor).cpu().numpy().reshape(-1)
     return np.clip(action, ACTION_LOW, ACTION_HIGH)
 
@@ -98,14 +98,17 @@ def measure_latency(model_path, n=50):
     return (time.perf_counter() - start) / n
 
 
-def evaluate(model_path, n_episodes=EVAL_EPISODES_CI, env=None, verbose=False):
-    """Run ``n_episodes`` deterministic episodes on the canonical env and report metrics.
+def evaluate_policy(policy, n_episodes=EVAL_EPISODES_CI, env=None, verbose=False):
+    """Run ``n_episodes`` deterministic episodes with an already-loaded ``policy`` and report metrics.
+
+    ``policy`` is any callable mapping ``obs (1, 4, 96, 96)`` float32 -> ``action (1, 8)`` — e.g. a
+    module returned by ``torch.jit.load`` (grading) or ``panda_lift_pixels.extract_actor`` (pre-export
+    sanity check). This function never imports Stable-Baselines3.
 
     Success and reward are read from the env's canonical (sparse) signal. The graded metric is
     ``median_reward``; the rest are diagnostics. ``success_rate`` uses the final-step
     ``is_success`` (cube lifted-and-held at the end of the episode — anti-flick).
     """
-    policy = load_policy(model_path)
     own_env = env is None
     if own_env:
         env = PandaLiftPixels()
@@ -142,3 +145,12 @@ def evaluate(model_path, n_episodes=EVAL_EPISODES_CI, env=None, verbose=False):
         "seed_offset": offset,
         "returns": returns.tolist(),
     }
+
+
+def evaluate(model_path, n_episodes=EVAL_EPISODES_CI, env=None, verbose=False):
+    """Load ``model.pt`` from ``model_path`` and evaluate it — the metric the grader computes.
+
+    Thin wrapper over :func:`evaluate_policy` that loads the TorchScript module first. Behaviour is
+    identical to the previous ``evaluate`` (the CI grader path is unchanged).
+    """
+    return evaluate_policy(load_policy(model_path), n_episodes=n_episodes, env=env, verbose=verbose)

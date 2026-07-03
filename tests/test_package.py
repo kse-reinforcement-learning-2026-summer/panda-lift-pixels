@@ -71,6 +71,40 @@ def test_export_matches_sb3(tiny_model):
     assert selfcheck(tiny_model, MODEL_PATH, n_steps=5) < 1e-4
 
 
+@pytest.mark.parametrize("algo_name", ["A2C", "PPO", "DDPG", "TD3", "SAC"])
+def test_extract_actor_all_algorithms(algo_name):
+    """extract_actor must reproduce model.predict(deterministic=True) for every allowed algorithm.
+
+    Untrained (random) weights are enough — we only check the extracted actor path matches SB3.
+    """
+    import stable_baselines3 as sb3
+    from panda_lift_pixels import extract_actor
+
+    Algo = getattr(sb3, algo_name)
+    env = gym.make("PandaLiftPixels-v0")
+    kwargs = dict(policy_kwargs=dict(normalize_images=False), device="cpu", verbose=0)
+    if algo_name in ("DDPG", "TD3", "SAC"):
+        kwargs["buffer_size"] = 200  # tiny: avoid allocating a huge image replay buffer
+    model = Algo("CnnPolicy", env, **kwargs)
+
+    actor = extract_actor(model).eval()
+    obs_batch = np.random.rand(4, *contract.OBS_SHAPE).astype(np.float32)
+    with torch.no_grad():
+        actions_actor = actor(torch.as_tensor(obs_batch)).numpy()
+    actions_sb3 = np.array([model.predict(o, deterministic=True)[0] for o in obs_batch])
+
+    assert np.abs(actions_actor - actions_sb3).max() < 1e-4
+    env.close()
+
+
+def test_evaluate_policy_matches_evaluate(tiny_model):
+    """evaluate_policy(loaded) must equal evaluate(path) (same seeds → identical metrics)."""
+    m_path = grading.evaluate(MODEL_PATH, n_episodes=2)
+    m_policy = grading.evaluate_policy(grading.load_policy(MODEL_PATH), n_episodes=2)
+    assert m_path["median_reward"] == m_policy["median_reward"]
+    assert m_path["success_rate"] == m_policy["success_rate"]
+
+
 def test_contract_and_param_count(tiny_model):
     n = grading.check_contract(MODEL_PATH)
     assert 0 < n <= contract.PARAM_LIMIT
