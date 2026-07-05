@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "panda-lift-pixels"
-version = "6.5.0"
-description = "Frozen pixel-based Panda Lift environment and grader for KSE RL Project 2"
+name = "panda-push-pixels"
+version = "1.0.0"
+description = "Frozen pixel-based Panda Push environment and grader for KSE RL Project 2"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Training extras — installed in Colab/Kaggle via `pip install "panda-lift-pixels[train]"`.
+# Training extras — installed in Colab/Kaggle via `pip install "panda-push-pixels[train]"`.
 train = [
     "stable-baselines3==2.8.0",
     "sb3-contrib==2.8.0",

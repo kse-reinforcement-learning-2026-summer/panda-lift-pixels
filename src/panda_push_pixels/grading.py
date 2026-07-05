@@ -20,7 +20,7 @@ from .contract import (
     OBS_SHAPE,
     PARAM_LIMIT,
 )
-from .env import PandaLiftPixels
+from .env import PandaPushPixels
 
 
 def load_policy(model_path):
@@ -34,7 +34,7 @@ def count_parameters(model_path):
     policy = load_policy(model_path)
     n = int(sum(p.numel() for p in policy.parameters()))
     assert n > 0, (
-        "model.pt exposes 0 parameters — export with panda_lift_pixels.export_model and do "
+        "model.pt exposes 0 parameters — export with panda_push_pixels.export_model and do "
         "NOT call torch.jit.freeze (freezing hides parameters from the grader)."
     )
     return n
@@ -61,7 +61,7 @@ def check_contract(model_path):
 
     n_params = int(sum(p.numel() for p in policy.parameters()))
     assert n_params > 0, (
-        "model.pt exposes 0 parameters — export with panda_lift_pixels.export_model and do "
+        "model.pt exposes 0 parameters — export with panda_push_pixels.export_model and do "
         "NOT call torch.jit.freeze (freezing hides parameters from the grader)."
     )
     assert n_params <= PARAM_LIMIT, (
@@ -101,17 +101,18 @@ def measure_latency(model_path, n=50):
 def evaluate_policy(policy, n_episodes=EVAL_EPISODES_CI, env=None, verbose=False):
     """Run ``n_episodes`` deterministic episodes with an already-loaded ``policy`` and report metrics.
 
-    ``policy`` is any callable mapping ``obs (1, 12, 112, 112)`` float32 -> ``action (1, 8)`` — e.g. a
-    module returned by ``torch.jit.load`` (grading) or ``panda_lift_pixels.extract_actor`` (pre-export
+    ``policy`` is any callable mapping ``obs (1, 12, 112, 112)`` float32 -> ``action (1, 7)`` — e.g. a
+    module returned by ``torch.jit.load`` (grading) or ``panda_push_pixels.extract_actor`` (pre-export
     sanity check). This function never imports Stable-Baselines3.
 
     Success and reward are read from the env's canonical (sparse) signal. The graded metric is
-    ``median_reward``; the rest are diagnostics. ``success_rate`` uses the final-step
-    ``is_success`` (cube lifted-and-held at the end of the episode — anti-flick).
+    ``median_reward``; the rest are diagnostics. The episode terminates the instant the cube
+    reaches the target, so ``success_rate`` is simply the fraction of episodes that ended that
+    way (rather than timing out) — no flicker case to guard against.
     """
     own_env = env is None
     if own_env:
-        env = PandaLiftPixels()
+        env = PandaPushPixels()
 
     offset = _seed_offset()
     returns = []

@@ -1,4 +1,4 @@
-"""Self-tests for the panda-lift-pixels package (run in the package repo's own CI).
+"""Self-tests for the panda-push-pixels package (run in the package repo's own CI).
 
 These verify the frozen contract and the grading pipeline. They train a tiny model on CPU, so
 they are slow-ish but self-contained. Requires the ``[train]`` extra (Stable-Baselines3).
@@ -11,11 +11,11 @@ import numpy as np
 import pytest
 import torch
 
-import panda_lift_pixels
-from panda_lift_pixels import contract, export_model, make_eval_env, selfcheck
-from panda_lift_pixels import grading
+import panda_push_pixels
+from panda_push_pixels import contract, export_model, make_eval_env, selfcheck
+from panda_push_pixels import grading
 
-MODEL_PATH = "/tmp/_plp_selftest_model.pt"
+MODEL_PATH = "/tmp/_ppp_selftest_model.pt"
 
 
 def test_env_observation_contract():
@@ -25,95 +25,60 @@ def test_env_observation_contract():
     assert obs.dtype == np.float32
     assert obs.min() >= 0.0 and obs.max() <= 1.0
     assert tuple(env.action_space.shape) == (contract.ACTION_DIM,)
-    assert "is_grasped" in info and "object_height" in info
+    assert {
+        "object_position", "target_position", "object_size", "ee_position",
+        "object_to_target", "ee_to_object", "is_touching", "is_success",
+    } <= set(info)
     env.close()
 
 
 def test_episode_horizon_and_reward():
-    """Horizon is MAX_EPISODE_STEPS agent *decisions* (not physics steps)."""
+    """Horizon is MAX_EPISODE_STEPS unless the cube reaches the target sooner (early termination)."""
     env = make_eval_env()
     env.reset(seed=0)
     rewards, done, steps = [], False, 0
+    info = None
     while not done:
-        _, r, term, trunc, _ = env.step(env.action_space.sample())
+        _, r, term, trunc, info = env.step(env.action_space.sample())
         rewards.append(r)
         steps += 1
         done = term or trunc
-    assert steps == contract.MAX_EPISODE_STEPS   # 50 decisions regardless of action_repeat
+    assert steps <= contract.MAX_EPISODE_STEPS
     assert set(np.unique(rewards)).issubset({-1.0, 0.0})
+    if steps < contract.MAX_EPISODE_STEPS:
+        assert info["is_success"]        # the only way to end before the horizon is success
     env.close()
 
 
-def test_action_repeat_default():
-    """Default action_repeat=2: each env.step() covers 2 physics steps (1 render)."""
-    from panda_lift_pixels import PandaLiftPixels
-    env = PandaLiftPixels()
-    assert env._action_repeat == contract.ACTION_REPEAT == 2
-    obs1, _ = env.reset(seed=0)
-    obs2, _, _, _, _ = env.step(env.action_space.sample())
-    assert obs1.shape == obs2.shape == contract.OBS_SHAPE
-    env.close()
-
-
-def test_curriculum_start_grasped_on_table():
-    """start_grasped: cube gripped where it spawns ON THE TABLE (h<threshold => must still be lifted)."""
+def test_terminates_on_success():
+    """The episode ends the instant the cube reaches the target (vanilla PandaPush semantics)."""
     env = make_eval_env()
-    env.reset(seed=2, options={"start_grasped": True})
-    _, _, _, _, info = env.step(np.zeros(contract.ACTION_DIM, dtype=np.float32))  # 1 step registers contact
-    assert info["n_fingers_touching"] == 2
-    assert info["object_height"] < contract.GRASP_LIFT_OFF      # on the table -> agent must lift it
-    assert info["gripper_to_object"] < 0.03                     # cube held in the gripper
+    env.reset(seed=0)
+    tgt = env._sim.get_base_position("target")
+    env._sim.set_base_pose("object", tgt, np.array([0.0, 0.0, 0.0, 1.0]))  # teleport cube onto target
+    _, reward, terminated, truncated, info = env.step(np.zeros(contract.ACTION_DIM, dtype=np.float32))
+    assert info["is_success"] is True
+    assert terminated is True
+    assert truncated is False
+    assert reward == 0.0
     env.close()
 
 
-def test_curriculum_start_lifted_in_air():
-    """start_lifted: cube gripped IN THE AIR (above the lift-off height), from a sampled ee box."""
-    env = make_eval_env()
-    env.reset(seed=3, options={"start_lifted": True})
-    _, _, _, _, info = env.step(np.zeros(contract.ACTION_DIM, dtype=np.float32))
-    assert info["n_fingers_touching"] == 2
-    assert info["object_height"] > contract.GRASP_LIFT_OFF      # already lifted -> agent must hold
-    env.close()
-
-
-def test_curriculum_ee_start_reach():
-    """ee_start (no grasp): gripper placed at a target with a chosen width; cube stays on the table."""
-    env = make_eval_env()
-    _, info = env.reset(seed=4, options={"ee_start": [0.10, -0.08, 0.18], "gripper_width": 0.05})
-    assert abs(info["fingers_width"] - 0.05) < 0.01             # width honoured (randomisable via range)
-    assert info["object_height"] < contract.GRASP_LIFT_OFF      # cube on the table, not grasped
-    assert np.linalg.norm(info["ee_position"] - np.array([0.10, -0.08, 0.18])) < 0.06  # IK ~near target
-    env.close()
-
-
-def test_curriculum_start_reached():
-    """start_reached: OPEN gripper (>= cube width) at the cube on the table; agent only has to close."""
-    env = make_eval_env()
-    _, info = env.reset(seed=6, options={"start_reached": True})
-    assert info["object_height"] < contract.GRASP_LIFT_OFF      # cube on the table, not lifted
-    assert info["gripper_to_object"] < 0.03                     # gripper is AT the cube
-    assert info["fingers_width"] >= 0.039                       # open at least ~cube width (not grasping)
-    env.close()
-
-
-def test_is_touching_present_and_pure_contact():
-    """info exposes a pure-contact is_touching signal (grasp without the height gate)."""
+def test_privileged_info_typed_and_consistent():
+    """info exposes what's needed to build a reward: positions/size/contact, correctly typed."""
     env = make_eval_env()
     _, info = env.reset(seed=0)
-    # both keys present, boolean-typed
-    assert "is_touching" in info and "is_grasped" in info
     assert isinstance(bool(info["is_touching"]), bool)
-    # per-finger contact ladder exposed for grasp shaping
-    assert {"left_finger_touch", "right_finger_touch", "n_fingers_touching"} <= set(info)
+    assert info["object_position"].shape == (3,)
+    assert info["target_position"].shape == (3,)
+    assert info["ee_position"].shape == (3,)
+    assert info["object_size"] == contract.OBJECT_SIZE
+    assert info["object_to_target"] == pytest.approx(
+        float(np.linalg.norm(info["object_position"] - info["target_position"])), abs=1e-5
+    )
     for _ in range(20):
         _, _, term, trunc, info = env.step(env.action_space.sample())
-        # is_grasped implies is_touching (grasped = touching AND lifted), never the reverse constraint
-        assert not (info["is_grasped"] and not info["is_touching"])
-        # n_fingers_touching in {0,1,2} and consistent with the per-finger / both-finger signals
-        n = info["n_fingers_touching"]
-        assert n == int(info["left_finger_touch"]) + int(info["right_finger_touch"])
-        assert n in (0, 1, 2)
-        assert info["is_touching"] == (n == 2)
+        assert info["is_success"] == (info["object_to_target"] < contract.DISTANCE_THRESHOLD)
         if term or trunc:
             break
     env.close()
@@ -123,7 +88,7 @@ def test_is_touching_present_and_pure_contact():
 def tiny_model():
     from stable_baselines3 import SAC
 
-    env = gym.make("PandaLiftPixels-v0", max_episode_steps=50)
+    env = gym.make("PandaPushPixels-v0", max_episode_steps=50)
     model = SAC(
         "CnnPolicy", env, buffer_size=400, learning_starts=40, train_freq=4, batch_size=32,
         policy_kwargs=dict(normalize_images=False), device="cpu", verbose=0,
@@ -147,10 +112,10 @@ def test_extract_actor_all_algorithms(algo_name):
     Untrained (random) weights are enough — we only check the extracted actor path matches SB3.
     """
     import stable_baselines3 as sb3
-    from panda_lift_pixels import extract_actor
+    from panda_push_pixels import extract_actor
 
     Algo = getattr(sb3, algo_name)
-    env = gym.make("PandaLiftPixels-v0")
+    env = gym.make("PandaPushPixels-v0")
     kwargs = dict(policy_kwargs=dict(normalize_images=False), device="cpu", verbose=0)
     if algo_name in ("DDPG", "TD3", "SAC"):
         kwargs["buffer_size"] = 200  # tiny: avoid allocating a huge image replay buffer

@@ -14,7 +14,7 @@ GitHub Secret). Everything else here is public on purpose.
 # ---------------------------------------------------------------------------
 N_STACK = 4                                   # DQN-style frame stack
 FRAME_HW = 112                                # rendered frame is FRAME_HW x FRAME_HW
-CHANNELS_PER_FRAME = 3                        # RGB (the cube is green — pops in colour, muddy in grayscale)
+CHANNELS_PER_FRAME = 3                        # RGB (the cube is green, the target is red — color matters)
 OBS_SHAPE = (N_STACK * CHANNELS_PER_FRAME, FRAME_HW, FRAME_HW)  # (12, 112, 112), channels-first
 OBS_LOW = 0.0
 OBS_HIGH = 1.0                                # observations are float32 in [0, 1] (already /255)
@@ -22,21 +22,22 @@ OBS_HIGH = 1.0                                # observations are float32 in [0, 
 # ---------------------------------------------------------------------------
 # Action contract — what the model must output
 # ---------------------------------------------------------------------------
-ACTION_REPEAT = 2                            # physics steps per agent decision (baked into PandaLiftPixels)
-ACTION_DIM = 8                               # 7 joint position deltas + 1 gripper (joints control)
+ACTION_DIM = 7                               # 7 joint position deltas (joints control; gripper stays closed)
 ACTION_LOW = -1.0
 ACTION_HIGH = 1.0                            # the grader clips outputs into [ACTION_LOW, ACTION_HIGH]
 
 # ---------------------------------------------------------------------------
-# Task definition — the behavior we grade (Lift: grasp the cube and hold it up)
+# Task definition — the behavior we grade (Push: push the cube onto the target)
 # ---------------------------------------------------------------------------
-BASE_ENV_ID = "PandaPickAndPlaceJoints-v3"
-LIFT_HEIGHT = 0.10           # object-center height (m) above which the cube counts as "lifted"
-GRASP_LIFT_OFF = 0.045       # object clearly off the table (resting center ≈ 0.02 m)
-MAX_EPISODE_STEPS = 50       # grading horizon; canonical sparse reward integrates over this
+BASE_ENV_ID = "PandaPushJoints-v3"
+OBJECT_SIZE = 0.04           # cube (and target marker) side length (m)
+DISTANCE_THRESHOLD = 0.05    # success: object-to-target center distance (m) below this
+MAX_EPISODE_STEPS = 50       # grading horizon (one physics step per decision, no frame skip)
 
-# Canonical reward = 0.0 if (object lifted above LIFT_HEIGHT AND grasped) else -1.0, per step.
-# Over MAX_EPISODE_STEPS this gives a return in [-MAX_EPISODE_STEPS, 0].
+# Canonical reward is sparse: 0.0 on a step where the cube is within DISTANCE_THRESHOLD of the
+# target, else -1.0. The episode TERMINATES the instant the cube reaches the target (matching
+# vanilla PandaPush) — so the return is -(steps taken to succeed), or -MAX_EPISODE_STEPS if the
+# episode times out without success.
 
 # ---------------------------------------------------------------------------
 # Grading thresholds
