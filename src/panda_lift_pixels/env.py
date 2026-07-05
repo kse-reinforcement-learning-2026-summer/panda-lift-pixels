@@ -38,14 +38,14 @@ from .contract import (
 _LEFT_FINGER_LINK = 9
 _RIGHT_FINGER_LINK = 10
 
-# Camera: 3/4 view framed on the workspace — shows the whole arm (all joints/links, needed for
-# joints control), the gripper, table, and cube; background/floor trimmed out.
+# Camera: frontal view framed on the workspace — the gripper sits centred above the cube, so the
+# gripper<->cube alignment is read head-on (clearer for grasping); table fills the frame, floor trimmed.
 _RENDER_DEFAULTS = dict(
     render_width=112,
     render_height=112,
-    render_distance=0.85,
-    render_target_position=[-0.15, 0.0, 0.15],
-    render_yaw=50,
+    render_distance=1.1,
+    render_target_position=[-0.35, 0.0, 0.07],
+    render_yaw=90,
     render_pitch=-25,
 )
 
